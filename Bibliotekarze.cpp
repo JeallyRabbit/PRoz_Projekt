@@ -71,12 +71,17 @@ void process_message(const Message& msg, std::vector<MPCStatus>& mpc_status, int
         approvals++;
     } else if (msg.tag == TAG_REJECT) {
         conflicts++;
-    } else if (msg.tag == TAG_REQUEST) {
+    } if (msg.tag == TAG_REQUEST) {
         request_queue.push(msg);
+        // Determine priority based on Lamport time and rank
         if (mpc_status[msg.mpc_id].reserved_by == -1 ||  // If MPC is free
             (mpc_status[msg.mpc_id].reserved_by == rank &&  // Or current process has priority
-             (msg.lamport_time > lamport_time || (msg.lamport_time == lamport_time && msg.sender_rank > rank)))) {
+            ((msg.lamport_time > lamport_time) || 
+            (msg.lamport_time == lamport_time && msg.sender_rank > rank)))) {
             send_message_with_time(msg.sender_rank, TAG_APPROVE, msg.mpc_id, rank);
+        } else {
+            // Defer request (don't approve or reject yet)
+            send_message_with_time(msg.sender_rank, TAG_REJECT, msg.mpc_id, rank);
         }
     } else if (msg.tag == TAG_RESERVE) {
         mpc_status[msg.mpc_id] = {msg.mpc_id, msg.sender_rank};
