@@ -1,0 +1,169 @@
+#include <mpi.h>
+#include <iostream>
+#include <vector>
+#include <cstdlib>
+#include <ctime>
+#include <algorithm>
+#include <thread>
+#include <chrono>
+
+#define FREE -1 // MPC jest wolny
+#define REQUEST 0 // Typ wiadomości: żądanie zasobu
+#define RELEASE 1 // Typ wiadomości: zwolnienie zasobu
+#define ACK 2     // Typ wiadomości: akceptacja żądania
+#define RESERVE 3 // Typ wiadomości: rezerwacja zasobu
+
+// Funkcja do losowego czasu oczekiwania
+void random_sleep(int max_time) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(rand() % max_time));
+}
+
+void fixed_sleep(int time_ms) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(time_ms));
+}
+
+// Funkcja do drukowania statusu MPC
+void print_mpc_status(int rank, const std::vector<int>& mpc, int lamport_clock) {
+    std::cout << "Proces " << rank << " (Zegar: " << lamport_clock << ") stan MPC: [";
+    for (size_t i = 0; i < mpc.size(); ++i) {
+        std::cout << mpc[i] << (i < mpc.size() - 1 ? ", " : "");
+    }
+    std::cout << "]\n";
+}
+
+int main(int argc, char** argv) {
+    MPI_Init(&argc, &argv);
+
+    int rank, size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    srand(time(NULL) + rank);
+
+    const int M = 3; // Liczba MPC
+    std::vector<int> mpc(M, FREE); // Tablica stanów MPC
+    int lamport_clock = 0;
+    int request_lamport = -1; // Zegar Lamporta zapisany przy wysyłaniu żądania
+
+    while (true) {
+        random_sleep(100); // Losowy czas oczekiwania przed próbą rezerwacji
+
+        bool resource_acquired = false;
+
+        while (!resource_acquired) {
+            // Krok 2: Szukanie dostępnego MPC
+            int selected_mpc = -1;
+            for (int i = 0; i < M; ++i) {
+                if (mpc[i] == FREE) {
+                    selected_mpc = i;
+                    break;
+                }
+            }
+
+            if (selected_mpc == -1) {
+                std::cout << "Proces " << rank << " (Zegar: " << lamport_clock << "): Brak dostępnych MPC, czekanie 2 sekundy.\n";
+                fixed_sleep(2000);
+                continue;
+            }
+
+            lamport_clock++;
+            request_lamport = lamport_clock; // Zapisanie zegara Lamporta przy wysyłaniu żądania
+            std::cout << "Proces " << rank << " (Zegar: " << lamport_clock << "): Próba zajęcia MPC " << selected_mpc << "\n";
+
+            // Wysłanie żądań o rezerwację
+            for (int i = 0; i < size; ++i) {
+                if (i != rank) {
+                    int request_data[2] = {request_lamport, selected_mpc};
+                    MPI_Send(request_data, 2, MPI_INT, i, REQUEST, MPI_COMM_WORLD);
+                    std::cout << "Proces " << rank << " (Zegar: " << lamport_clock << ") wysyła żądanie do procesu " << i << " dla MPC " << selected_mpc << "\n";
+                }
+            }
+
+            int accept_count = 0;
+            bool has_conflict = false;
+
+            while (accept_count < size - 1) {
+                MPI_Status status;
+                int received_data[2];
+                MPI_Recv(received_data, 2, MPI_INT, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+
+                int received_clock = received_data[0];
+                int received_mpc = received_data[1];
+                lamport_clock = std::max(lamport_clock, received_clock) + 1;
+
+                std::cout << "Proces " << rank << " (Zegar: " << lamport_clock << "): Otrzymano wiadomość od procesu " << status.MPI_SOURCE
+                          << " (rec_clock: " << received_clock << ", mpc: " << received_mpc << ", tag: " << status.MPI_TAG << ")\n";
+
+                if (status.MPI_TAG == REQUEST) {
+                    if (received_mpc == selected_mpc) {
+                        // Konflikt dotyczy tego samego MPC
+                        if (received_clock < request_lamport || (received_clock == request_lamport && status.MPI_SOURCE < rank)) {
+                            int ack_data[2] = {lamport_clock, received_mpc};
+                            MPI_Send(ack_data, 2, MPI_INT, status.MPI_SOURCE, ACK, MPI_COMM_WORLD);
+                            std::cout << "Proces " << rank << " (Zegar: " << lamport_clock << ") ustępuje na rzecz procesu "
+                                      << status.MPI_SOURCE << " dla MPC " << received_mpc << "\n";
+
+                            // Aktualizacja stanu MPC w przypadku przegranej
+                            mpc[received_mpc] = status.MPI_SOURCE;
+                            has_conflict = true;
+                            break;
+                        }
+                    } else {
+                        // Żądanie dotyczy innego MPC
+                        int ack_data[2] = {lamport_clock, received_mpc};
+                        MPI_Send(ack_data, 2, MPI_INT, status.MPI_SOURCE, ACK, MPI_COMM_WORLD);
+                        std::cout << "Proces " << rank << " (Zegar: " << lamport_clock << ") brak konfliktu dla MPC " << received_mpc << "\n";
+                    }
+                } else if (status.MPI_TAG == ACK) {
+                    accept_count++;
+                } else if (status.MPI_TAG == RESERVE) {
+                    mpc[received_mpc] = status.MPI_SOURCE;
+                    std::cout << "Proces " << rank << " (Zegar: " << lamport_clock << "): Otrzymano informację o rezerwacji MPC " << received_mpc
+                              << " przez proces " << status.MPI_SOURCE << "\n";
+                } else if (status.MPI_TAG == RELEASE) {
+                    mpc[received_mpc] = FREE;
+                    std::cout << "Proces " << rank << " (Zegar: " << lamport_clock << "): Otrzymano informację o zwolnieniu MPC " << received_mpc
+                              << " przez proces " << status.MPI_SOURCE << "\n";
+                }
+            }
+
+            if (has_conflict) {
+                std::cout << "Proces " << rank << " (Zegar: " << lamport_clock << "): Konflikt wykryty, czeka na ponowną próbę zajęcia MPC.\n";
+                continue;
+            }
+
+            // Aktualizacja stanu po wygraniu rezerwacji
+            mpc[selected_mpc] = rank;
+            std::cout << "Proces " << rank << " (Zegar: " << lamport_clock << ") zajmuje MPC " << selected_mpc << "\n";
+            print_mpc_status(rank, mpc, lamport_clock);
+
+            // Wysłanie informacji o rezerwacji
+            for (int i = 0; i < size; ++i) {
+                if (i != rank) {
+                    int reserve_data[2] = {lamport_clock, selected_mpc};
+                    MPI_Send(reserve_data, 2, MPI_INT, i, RESERVE, MPI_COMM_WORLD);
+                    std::cout << "Proces " << rank << " (Zegar: " << lamport_clock << ") wysłał wiadomość RESERVE (MPC: " << selected_mpc << ") do procesu " << i << ".\n";
+                }
+            }
+
+            fixed_sleep(10000); // Symulacja korzystania z MPC
+
+            // Zwolnienie MPC
+            lamport_clock++;
+            mpc[selected_mpc] = FREE;
+            for (int i = 0; i < size; ++i) {
+                if (i != rank) {
+                    int release_data[2] = {lamport_clock, selected_mpc};
+                    MPI_Send(release_data, 2, MPI_INT, i, RELEASE, MPI_COMM_WORLD);
+                    std::cout << "Proces " << rank << " (Zegar: " << lamport_clock << ") informuje proces " << i << " o zwolnieniu MPC " << selected_mpc << "\n";
+                }
+            }
+
+            std::cout << "Proces " << rank << " (Zegar: " << lamport_clock << ") zwalnia MPC " << selected_mpc << "\n";
+            print_mpc_status(rank, mpc, lamport_clock);
+        }
+    }
+
+    MPI_Finalize();
+    return 0;
+}
