@@ -84,7 +84,7 @@ void process_message(const Message& msg, std::vector<MPCStatus>& mpc_status, int
                   << " przez proces " << msg.sender_rank << " (czas: " << lamport_time << ")." << std::endl;
         log_mpc_status(mpc_status, rank);
 
-        // Sprawdź czy rezerwowany (przez inny proces) MPC jets tym o który proces przetwarzający wiadomość się ubiega - czy chodzi o "mój" MPC
+        // Sprawdź czy rezerwowany (przez inny proces) MPC jets tym o który proces przetwarzający wiadomość się ubiega - czy chodzi o "mój" MPC
         if (msg.mpc_id == mpc_to_request) {
             std::cout << "Proces " << rank << ": Wybrany MPC " << mpc_to_request << " został zarezerwowany przez inny proces. Szukam nowego MPC." << std::endl;
             mpc_to_request = -1;
@@ -128,7 +128,7 @@ int main(int argc, char** argv) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &global_size); // Inicjalizacja globalnego rozmiaru (liczby procesów)
 
-    const int M = 2; // Liczba MPC
+    const int M = 4; // Liczba MPC
     std::vector<MPCStatus> mpc_status;
     for (int i = 0; i < M; ++i) {
         mpc_status.push_back({i, -1}); // Inicjalizacja MPC z ich ID i stanem "niezarezerwowany" 
@@ -142,7 +142,7 @@ int main(int argc, char** argv) {
     post_async_receive(&request, buffer);
 
     while (true) {
-        sleep(rand() % 4 + 1); // Zasymulowanie opóźnienia pomiędzy żądaniami
+        //sleep(rand() % 4 + 1); // Zasymulowanie opóźnienia pomiędzy żądaniami
 
         // Przetwarzanie otrzymanych wiadomości - asynchronicznie -> proces zajmuje się swoją "pracą" np. szukaniem MPC czy poganianiem czytelników i w tym samym czasie przetwarza wiadomości od innych
         while (!request_queue.empty()) {
@@ -150,7 +150,7 @@ int main(int argc, char** argv) {
             request_queue.pop();
             int temp_approvals = 0;
             int temp_conflicts = 0;
-            process_message(msg, mpc_status, rank, msg.mpc_id  , temp_approvals, temp_conflicts);
+            process_message(msg, mpc_status, rank, msg.mpc_id , temp_approvals, temp_conflicts);
             //process_message(msg, mpc_status, rank, mpc_to_request, approvals, conflicts);
         }
 
@@ -225,37 +225,41 @@ int main(int argc, char** argv) {
         log_mpc_status(mpc_status, rank);
 
         //Losowy czas korzystania z MPC
-        sleep(rand() % 3 + 1);
+        //sleep(rand() % 3 + 1);
 
 
-        // Informowanie innych o zwolnieniu MPC
-        mpc_status[mpc_to_request] = {mpc_to_request, -1};
-        for (int i = 0; i < global_size; ++i) {
-            if (i != rank) {
-                send_message_with_time(i, TAG_RELEASE, mpc_to_request, rank);
-            }
-        }
-
-        // Czekanie na otryzmanie potwierdzeń o otrzymaniu wiadomości o zwolnieniu
-        int release_acks = 0;
-        while (release_acks < global_size - 1) {
-            int flag;
-            MPI_Test(&request, &flag, &status);
-            if (flag) {
-                Message msg = {buffer[0], buffer[1], buffer[2], buffer[3]};
-                if (msg.tag == TAG_ACK) {
-                    release_acks++;
-                } else {
-                    process_message(msg, mpc_status, rank, mpc_to_request, approvals, conflicts);
+        if((rand() %1000+1)%999 == 0); // Zasymulowanie opóźnienia pomiędzy żądaniami
+        {
+            std::cout << "Proces " << rank << ": Zwalnia MPC " << mpc_to_request << " (czas: " << lamport_time << ")." << std::endl;
+            // Informowanie innych o zwolnieniu MPC
+            mpc_status[mpc_to_request] = {mpc_to_request, -1};
+            for (int i = 0; i < global_size; ++i) {
+                if (i != rank) {
+                    send_message_with_time(i, TAG_RELEASE, mpc_to_request, rank);
                 }
-                post_async_receive(&request, buffer);
             }
-        }
 
-        log_mpc_status(mpc_status, rank);
+            // Czekanie na otryzmanie potwierdzeń o otrzymaniu wiadomości o zwolnieniu
+            int release_acks = 0;
+            while (release_acks < global_size - 1) {
+                int flag;
+                MPI_Test(&request, &flag, &status);
+                if (flag) {
+                    Message msg = {buffer[0], buffer[1], buffer[2], buffer[3]};
+                    if (msg.tag == TAG_ACK) {
+                        release_acks++;
+                    } else {
+                        process_message(msg, mpc_status, rank, mpc_to_request, approvals, conflicts);
+                    }
+                    post_async_receive(&request, buffer);
+                }
+            }
+
+            log_mpc_status(mpc_status, rank);
+        }
+        
     }
 
     MPI_Finalize();
     return 0;
 }
-
