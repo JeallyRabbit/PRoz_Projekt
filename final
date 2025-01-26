@@ -1,0 +1,202 @@
+#include <mpi.h>
+#include <iostream>
+#include <vector>
+#include <queue>
+#include <cstdlib>
+#include <ctime>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <algorithm>
+
+#define TAG_REQUEST 1
+#define TAG_APPROVE 2
+#define TAG_RESERVE 3
+#define TAG_RELEASE 4
+#define TAG_ACK 5
+
+struct MPCStatus {
+    int mpc_id;
+    int reserved_by; // -1 means it's free
+};
+
+struct Message {
+    int lamport_time;
+    int sender_rank;
+    int mpc_id;
+    int tag;
+
+    bool operator<(const Message& other) const {
+        if (lamport_time == other.lamport_time) {
+            return sender_rank > other.sender_rank; // Lower rank has higher priority
+        }
+        return lamport_time > other.lamport_time; // Lower Lamport time has higher priority
+    }
+};
+
+int lamport_time = 0;
+int global_size = 0; // Number of processes
+std::priority_queue<Message> message_queue; // Incoming message queue
+std::mutex queue_mutex;
+std::condition_variable queue_cv;
+
+// Function to log the current status of all MPCs
+void log_mpc_status(const std::vector<MPCStatus>& mpc_status, int rank) {
+    std::cout << "Proces " << rank << ": Stan MPCs: [";
+    for (const auto& mpc : mpc_status) {
+        std::cout << "{mpc_id: " << mpc.mpc_id << ", reserved_by: " << mpc.reserved_by << "}, ";
+    }
+    std::cout << "]" << std::endl;
+}
+
+// Send a message with Lamport time
+void send_message_with_time(int target, int tag, int mpc_id, int rank) {
+    lamport_time++;
+    int message_data[4] = {lamport_time, rank, mpc_id, tag};
+    MPI_Send(message_data, 4, MPI_INT, target, tag, MPI_COMM_WORLD);
+}
+
+// Update Lamport time
+void update_lamport_time(int received_time) {
+    lamport_time = std::max(lamport_time, received_time) + 1;
+}
+
+// Process an individual message
+void process_message(const Message& msg, std::vector<MPCStatus>& mpc_status, int rank, int& mpc_to_request, int& approvals, int& conflicts) {
+    update_lamport_time(msg.lamport_time);
+
+    if (msg.tag == TAG_APPROVE) {
+        approvals++;
+    } else if (msg.tag == TAG_REQUEST) {
+        if (mpc_status[msg.mpc_id].reserved_by == -1 ||  // If the MPC is free
+            (mpc_status[msg.mpc_id].reserved_by == rank &&  // Or reserved by this process
+             (msg.lamport_time > lamport_time || (msg.lamport_time == lamport_time && msg.sender_rank > rank)))) {
+            send_message_with_time(msg.sender_rank, TAG_APPROVE, msg.mpc_id, rank);
+        }
+    } else if (msg.tag == TAG_RESERVE) {
+        mpc_status[msg.mpc_id] = {msg.mpc_id, msg.sender_rank};
+        std::cout << "Proces " << rank << ": Otrzymano informację o rezerwacji MPC " << msg.mpc_id
+                  << " przez proces " << msg.sender_rank << " (czas: " << lamport_time << ")." << std::endl;
+        log_mpc_status(mpc_status, rank);
+
+        // Check if the reserved MPC was the one being requested
+        if (msg.mpc_id == mpc_to_request) {
+            mpc_to_request = -1;
+            std::cout << "Proces " << rank << ": MPC " << msg.mpc_id << " został zarezerwowany przez inny proces." << std::endl;
+        }
+    } else if (msg.tag == TAG_RELEASE) {
+        mpc_status[msg.mpc_id] = {msg.mpc_id, -1};
+        std::cout << "Proces " << rank << ": Otrzymano informację o zwolnieniu MPC " << msg.mpc_id
+                  << " (czas: " << lamport_time << ")." << std::endl;
+        log_mpc_status(mpc_status, rank);
+    }
+}
+
+// Odzielny wątek do obsługi wiadomości
+void message_handling_thread(std::vector<MPCStatus>& mpc_status, int rank, int& mpc_to_request, int& approvals, int& conflicts) {
+    int buffer[4];
+    MPI_Status status;
+    while (true) {
+        MPI_Recv(buffer, 4, MPI_INT, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+        Message msg = {buffer[0], buffer[1], buffer[2], buffer[3]};
+        
+        // Process the message immediately
+        process_message(msg, mpc_status, rank, mpc_to_request, approvals, conflicts);
+        
+        // Optionally add the message to the queue (if needed for other operations)
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex);
+            message_queue.push(msg);
+        }
+        queue_cv.notify_all(); // Notify the main thread of any updates
+    }
+}
+
+
+
+
+int main(int argc, char** argv) {
+    MPI_Init(&argc, &argv);
+
+    int rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &global_size);
+
+    const int M = 1; // Number of MPCs
+    std::vector<MPCStatus> mpc_status(M, {-1, -1}); // Initialize MPCs as free
+
+    int mpc_to_request = -1;
+    int approvals = 0, conflicts = 0;
+
+    // Start the message-handling thread
+    std::thread msg_thread(message_handling_thread, std::ref(mpc_status), rank, std::ref(mpc_to_request), std::ref(approvals), std::ref(conflicts));
+
+    while (true) {
+        // Find a free MPC
+
+        mpc_to_request = -1;
+        for (int i = 0; i < M; ++i) {
+            if (mpc_status[i].reserved_by == -1) {
+                mpc_to_request = i;
+                break;
+            }
+        }
+
+        if (mpc_to_request == -1) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            continue;
+        }
+
+        std::cout << "Proces " << rank << ": Żądam rezerwacji MPC " << mpc_to_request << " (czas: " << lamport_time << ")." << std::endl;
+
+        // Send request for the selected MPC
+        approvals = 0;
+        conflicts = 0;
+        for (int i = 0; i < global_size; ++i) {
+            if (i != rank) {
+                std::cout << "Proces " << rank << ": Sending message - request MPC: " << mpc_to_request << " to "<< i <<" (czas: " << lamport_time << ")." << std::endl;
+                send_message_with_time(i, TAG_REQUEST, mpc_to_request, rank);
+            }
+        }
+
+        // Wait for responses
+        {
+            std::unique_lock<std::mutex> lock(queue_mutex);
+            queue_cv.wait(lock, [&]() { return approvals + conflicts >= global_size - 1; });
+        }
+
+        if (conflicts > 0) {
+            std::cout << "Proces " << rank << ": Konflikt przy rezerwacji MPC " << mpc_to_request << ", ponawiam próbę." << std::endl;
+            continue;
+        }
+
+        // Reserve the MPC
+        for (int i = 0; i < global_size; ++i) {
+            if (i != rank) {
+                send_message_with_time(i, TAG_RESERVE, mpc_to_request, rank);
+            }
+        }
+
+        mpc_status[mpc_to_request] = {mpc_to_request, rank};
+        std::cout << "Proces " << rank << ": Zarezerwowałem MPC " << mpc_to_request << "." << std::endl;
+        log_mpc_status(mpc_status, rank);
+
+        // Simulate using the MPC
+        std::this_thread::sleep_for(std::chrono::seconds(10));
+
+        // Release the MPC
+        mpc_status[mpc_to_request] = {mpc_to_request, -1};
+        for (int i = 0; i < global_size; ++i) {
+            if (i != rank) {
+                send_message_with_time(i, TAG_RELEASE, mpc_to_request, rank);
+            }
+        }
+
+        std::cout << "Proces " << rank << ": Zwolniłem MPC " << mpc_to_request << "." << std::endl;
+        log_mpc_status(mpc_status, rank);
+    }
+
+    msg_thread.join();
+    MPI_Finalize();
+    return 0;
+}
