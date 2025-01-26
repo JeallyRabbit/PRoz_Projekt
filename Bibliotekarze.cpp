@@ -82,6 +82,7 @@ void process_message(const Message& msg, std::vector<MPCStatus>& mpc_status, int
                 std::cout << "Proces " << rank << ": Ustępuję procesowi " << msg.sender_rank
                           << " dla MPC " << msg.mpc_id << " (czas: " << lamport_time << ")." << std::endl;
 
+                
                 // Wyślij TAG_APPROVE do procesu, który ma pierwszeństwo - przyzwolenie na użycie MPC
                 send_message_with_time(msg.sender_rank, TAG_APPROVE, msg.mpc_id, rank);
 
@@ -136,7 +137,7 @@ int main(int argc, char** argv) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &global_size);
 
-    const int M = 4; // Liczba MPC
+    const int M = 2; // Liczba MPC
     std::vector<MPCStatus> mpc_status;
     for (int i = 0; i < M; ++i) {
         mpc_status.push_back({i, -1}); // Inicjalizacja MPC z ich ID i stanem "niezarezerwowany" 
@@ -187,22 +188,24 @@ int main(int argc, char** argv) {
         }
 
         
-        // Zarezerwowanie MPC - powiadomienie innych o rezerwacji 
-        for (int i = 0; i < global_size; ++i) {
-            if (i != rank) {
-                send_message_with_time(i, TAG_RESERVE, mpc_to_request, rank);
-            }
-        }
+        
 
         // jeśli znaleziono MPC to wykorzystania - gdyby proces oddał swojego wybranego MPC innemu procesowi to ustawi swoje mpc_to_request na -1
         if(mpc_to_request!=-1)
         {
+            // Zarezerwowanie MPC - powiadomienie innych o rezerwacji 
+            for (int i = 0; i < global_size; ++i) {
+                if (i != rank) {
+                    send_message_with_time(i, TAG_RESERVE, mpc_to_request, rank);
+                }
+            }
+
             mpc_status[mpc_to_request] = {mpc_to_request, rank};
             std::cout << "Proces " << rank << ": Zarezerwowałem MPC " << mpc_to_request << "." << std::endl;
             log_mpc_status(mpc_status, rank);
 
-            // Symulacja używania MPC
-            random_wait(1000);
+            // Symulacja używania MPC - używanie przez czas o 10 sekund
+            random_wait(10000);
 
             // Zwolnienie MPC
             mpc_status[mpc_to_request] = {mpc_to_request, -1};
