@@ -142,7 +142,7 @@ int main(int argc, char** argv) {
     post_async_receive(&request, buffer);
 
     while (true) {
-        sleep(rand() % 10 + 1); // Zasymulowanie opóźnienia pomiędzy żądaniami
+        sleep(rand() % 4 + 1); // Zasymulowanie opóźnienia pomiędzy żądaniami
 
         // Przetwarzanie otrzymanych wiadomości - asynchronicznie -> proces zajmuje się swoją "pracą" np. szukaniem MPC czy poganianiem czytelników i w tym samym czasie przetwarza wiadomości od innych
         while (!request_queue.empty()) {
@@ -150,7 +150,8 @@ int main(int argc, char** argv) {
             request_queue.pop();
             int temp_approvals = 0;
             int temp_conflicts = 0;
-            process_message(msg, mpc_status, rank, temp_approvals, temp_conflicts);
+            process_message(msg, mpc_status, rank, msg.mpc_id  , temp_approvals, temp_conflicts);
+            //process_message(msg, mpc_status, rank, mpc_to_request, approvals, conflicts);
         }
 
         // Znajdź pierwszego wolnego MPC
@@ -224,7 +225,7 @@ int main(int argc, char** argv) {
         log_mpc_status(mpc_status, rank);
 
         //Losowy czas korzystania z MPC
-        sleep(rand() % 6 + 1);
+        sleep(rand() % 3 + 1);
 
 
         // Informowanie innych o zwolnieniu MPC
